@@ -1,0 +1,308 @@
+# ==============================================================
+# Aziot 16Amp Smart Circuit Breaker (with Energy Monitoring)
+# Base configuration for Beken BK72xx (cb2s)
+# Model: AZSCB02
+# ==============================================================
+
+esphome:
+  name: aziot-circuit-breaker-with-em
+  friendly_name: Aziot Circuit Breaker with EM
+  # -----------------------------------------------------------
+  # CRITICAL FIX: Prevents the Beken OS from hijacking pins
+  # Do not remove this, or the device will randomly reboot/fail.
+  # -----------------------------------------------------------
+  platformio_options:
+    build_flags:
+      - -DLT_AUTO_DOWNLOAD_REBOOT=0
+  on_boot:
+    priority: -10
+    then:
+      - script.execute: led_status_timer
+      - component.update: schedule_readout
+      - component.update: uptime_raw
+      - component.update: uptime_display
+
+bk72xx:
+  board: cb2s
+
+logger:
+  # -----------------------------------------------------------
+  # CRITICAL FIX: Stops the logger from crashing the device
+  # Beken chips can panic if the UART logger conflicts with pins.
+  # -----------------------------------------------------------
+  baud_rate: 0
+  hardware_uart: UART2
+
+# ==============================================================
+# CORE INTEGRATIONS (Home Assistant, Wi-Fi, OTA)
+# Make sure to define these values in your secrets.yaml file!
+# ==============================================================
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  # Fallback access point if the device cannot connect to Wi-Fi
+  ap:
+    ssid: "Circuit-Breaker"
+    password: !secret ap_password
+  on_connect:
+    - script.execute: led_status_timer
+    - if:
+        condition:
+          switch.is_on: switch_1
+        then:
+          - light.turn_on: breaker_led
+        else:
+          - light.turn_off: breaker_led
+  on_disconnect:
+    - script.execute: led_status_timer
+
+web_server:
+captive_portal:
+
+# ==============================================================
+# BLUETOOTH (Optional)
+# Uncomment these lines to use this device as a Bluetooth Proxy
+# for Home Assistant to detect nearby BLE devices.
+# ==============================================================
+# bk72xx_ble:
+# bk72xx_ble_tracker:
+# bluetooth_proxy:
+#   active: false
+
+# ==============================================================
+# CUSTOM AUTOMATIONS & SCRIPTS
+# ==============================================================
+
+# --- THE 90-SECOND STEALTH LED TIMER ---
+# Turns off the bright LED after 90 seconds to prevent light bleed
+script:
+  - id: led_status_timer
+    mode: restart
+    then:
+      - delay: 90s
+      - light.turn_off: breaker_led
+
+# --- OFFLINE BLINKING LOGIC ---
+# Blinks the LED once per second if Wi-Fi is disconnected
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            and:
+              - not:
+                  wifi.connected:
+              - script.is_running: led_status_timer
+          then:
+            - light.toggle: breaker_led
+
+# ==============================================================
+# HARDWARE COMPONENTS (LED, Relay, Button)
+# ==============================================================
+
+# --- LED HARDWARE MAPPING ---
+output:
+  - platform: gpio
+    id: led_output
+    pin:
+      number: P24 
+      inverted: true
+
+light:
+  - platform: binary
+    id: breaker_led
+    output: led_output
+
+# --- THE MAIN RELAY ---
+switch:
+  - platform: gpio
+    id: switch_1
+    name: "Breaker Main Switch"
+    pin: P26
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - script.execute: led_status_timer
+      - component.update: uptime_raw
+      - component.update: uptime_display
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - light.turn_on: breaker_led
+    on_turn_off:
+      - script.execute: led_status_timer
+      - component.update: uptime_raw
+      - component.update: uptime_display
+      - light.turn_off: breaker_led
+
+# --- PHYSICAL BUTTON ---
+binary_sensor:
+  - platform: gpio
+    id: physical_button
+    name: "Breaker Physical Button"
+    pin:
+      number: P10 # Tuya wired the single button to the All-Toggle pin!
+      inverted: true
+      mode: INPUT_PULLUP
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      - switch.toggle: switch_1
+
+# ==============================================================
+# SENSORS & ENERGY MONITORING (BL0937)
+# ==============================================================
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal Strength"
+    update_interval: 15min
+
+  - platform: uptime
+    id: uptime_raw
+    internal: true
+    update_interval: 15min
+
+  - platform: hlw8012
+    model: BL0937
+    cf_pin:
+      number: P8
+      inverted: true
+    cf1_pin:
+      number: P7
+      inverted: true
+    sel_pin:
+      number: P6
+      inverted: true
+    
+    # -----------------------------------------------------------
+    # CALIBRATION MULTIPLIERS
+    # Adjust these if your power readings drift from reality.
+    # -----------------------------------------------------------
+    voltage_divider: 736.9097722668512
+    current_resistor: 0.001299246371083645
+    update_interval: 30s
+    change_mode_every: 2
+
+    current:
+      name: "Current"
+      unit_of_measurement: A
+      accuracy_decimals: 3
+      filters:
+        - multiply: 0.4326262477748698
+    voltage:
+      name: "Voltage"
+      unit_of_measurement: V
+      accuracy_decimals: 1
+    power:
+      name: "Power"
+      unit_of_measurement: W
+      accuracy_decimals: 1
+    energy:
+      name: "Energy"
+      unit_of_measurement: kWh
+      accuracy_decimals: 2
+      filters:
+        - multiply: 0.001 # Converts Watt-hours to Kilowatt-hours
+
+# ==============================================================
+# SCHEDULING & TEXT DISPLAYS
+# ==============================================================
+
+# --- DYNAMIC SCHEDULE ENTITIES ---
+# Allows you to set fallback on/off times directly in Home Assistant 
+# that the breaker will honor even if the Home Assistant server goes offline.
+datetime:
+  - platform: template
+    type: time
+    name: "Turn On Time"
+    id: turn_on_time
+    optimistic: yes
+    restore_value: true
+    initial_value: "20:00:00"
+    on_value:
+      then:
+        - component.update: schedule_readout
+
+  - platform: template
+    type: time
+    name: "Turn Off Time"
+    id: turn_off_time
+    optimistic: yes
+    restore_value: true
+    initial_value: "02:00:00"
+    on_value:
+      then:
+        - component.update: schedule_readout
+
+# --- INTERNET TIME SCHEDULER ---
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "Asia/Kolkata"
+    on_time:
+      - seconds: 0
+        minutes: '*'
+        hours: '*'
+        then:
+          - lambda: |-
+              auto current = id(sntp_time).now();
+              if (!current.is_valid()) return; 
+              
+              if (current.hour == id(turn_on_time).hour && current.minute == id(turn_on_time).minute) {
+                id(switch_1).turn_on();
+              } 
+              else if (current.hour == id(turn_off_time).hour && current.minute == id(turn_off_time).minute) {
+                id(switch_1).turn_off();
+              }
+
+# --- TEXT DISPLAYS ---
+text_sensor:
+  - platform: template
+    name: "Uptime"
+    id: uptime_display
+    icon: "mdi:clock-outline"
+    update_interval: 15min
+    lambda: |-
+      uint32_t sec = (uint32_t)id(uptime_raw).state;
+      int days = sec / 86400;
+      int hours = (sec % 86400) / 3600;
+      int mins = (sec % 3600) / 60;
+      char buffer[32];
+      sprintf(buffer, "%dd %dh %dm", days, hours, mins);
+      return std::string(buffer);
+
+  - platform: template
+    name: "Active Schedule"
+    id: schedule_readout
+    icon: "mdi:calendar-clock"
+    update_interval: never
+    lambda: |-
+      char buffer[64];
+      int on_h = id(turn_on_time).hour;
+      int on_m = id(turn_on_time).minute;
+      int off_h = id(turn_off_time).hour;
+      int off_m = id(turn_off_time).minute;
+      
+      int on_h12 = (on_h % 12 == 0) ? 12 : (on_h % 12);
+      const char* on_ampm = (on_h >= 12) ? "PM" : "AM";
+      
+      int off_h12 = (off_h % 12 == 0) ? 12 : (off_h % 12);
+      const char* off_ampm = (off_h >= 12) ? "PM" : "AM";
+
+      sprintf(buffer, "ON: %02d:%02d %s | OFF: %02d:%02d %s", 
+              on_h12, on_m, on_ampm, off_h12, off_m, off_ampm);
+      return std::string(buffer);
+
+button:
+  - platform: restart
+    name: "Restart Breaker"
+    id: restart_device
