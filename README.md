@@ -1,6 +1,6 @@
 # Aziot 16A Smart Circuit Breaker with Energy Monitoring - ESPHome
 
-This repository contains a highly optimized, fully local ESPHome configuration for the **Aziot 16Amp WiFi + BLE Smart Circuit Breaker (Model: AZSCB02)**. 
+This repository contains a highly optimized, fully local ESPHome configuration for the [**Aziot 16Amp WiFi + BLE Smart Circuit Breaker (Model: AZSCB02)**](https://amazon.in/dp/B0DG8QMPPT). 
 
 Powered by the Beken CB2S chipset, this configuration removes the device from the proprietary cloud, enabling instantaneous local control and real-time power monitoring directly within Home Assistant.
 
